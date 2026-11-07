@@ -177,13 +177,28 @@ rpc("UserService", "CreateUser", "optional", async (req, ctx) => {
   return userToApi(created, { includeSensitive: true });
 });
 
+/** 未提供 updateMask 时，从请求体中推断需要更新的字段（与上游 Memos 的宽松行为一致） */
+const inferPathsFromUser = (user: any): string[] => {
+  const paths: string[] = [];
+  if (!user || typeof user !== "object") return paths;
+  if (typeof user.password === "string" && user.password.length > 0) paths.push("password");
+  if (typeof user.username === "string" && user.username.length > 0) paths.push("username");
+  if (typeof user.email === "string") paths.push("email");
+  if (typeof user.displayName === "string") paths.push("display_name");
+  if (typeof user.description === "string") paths.push("description");
+  if (typeof user.avatarUrl === "string") paths.push("avatar_url");
+  return paths;
+};
+
 rpc("UserService", "UpdateUser", "required", async (req, ctx) => {
   const auth = requireAuth(ctx);
   const target = await mustGetUserByName(ctx.env, req.user?.name);
   const admin = isAdmin(auth);
   if (!admin && auth.userId !== target.id) throw permissionDenied("cannot update other user");
 
-  const paths = normalizePaths(req);
+  let paths = normalizePaths(req);
+  // 兼容上游 Memos：未提供 updateMask 时，按请求里实际携带的字段推断更新路径
+  if (paths.length === 0) paths = inferPathsFromUser(req.user);
   if (paths.length === 0) throw invalidArgument("update_mask is required");
 
   const general = await getInstanceGeneralSetting(ctx.env);
@@ -395,13 +410,24 @@ rpc("UserService", "ListUserSettings", "required", async (req, ctx) => {
   return { settings, nextPageToken: "", totalSize: settings.length };
 });
 
+/** 未提供 updateMask 时，从 generalSetting 推断（locale / theme / memoVisibility） */
+const inferSettingPaths = (setting: any): string[] => {
+  const paths: string[] = [];
+  if (!setting || typeof setting !== "object") return paths;
+  if (typeof setting.locale === "string") paths.push("locale");
+  if (typeof setting.memoVisibility === "string") paths.push("memo_visibility");
+  if (typeof setting.theme === "string") paths.push("theme");
+  return paths;
+};
+
 rpc("UserService", "UpdateUserSetting", "required", async (req, ctx) => {
   const parsed = parseChildName(req.setting?.name, "settings");
   if (!parsed) throw invalidArgument(`invalid setting name: ${req.setting?.name}`);
   if (parsed.id !== "GENERAL") throw invalidArgument(`unsupported setting key: ${parsed.id}`);
   const target = await mustGetSettingTarget(ctx, parsed.username);
 
-  const paths = normalizePaths(req);
+  let paths = normalizePaths(req);
+  if (paths.length === 0) paths = inferSettingPaths(req.setting?.generalSetting);
   if (paths.length === 0) throw invalidArgument("update_mask is required");
 
   const current = await getGeneralSetting(ctx.env, target.id);
