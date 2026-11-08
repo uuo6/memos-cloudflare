@@ -71,9 +71,25 @@ export const toTimestamp = (unixSeconds: number | null | undefined): string | un
   return new Date(unixSeconds * 1000).toISOString();
 };
 
-export const fromTimestamp = (ts: string | null | undefined): number | undefined => {
-  if (!ts) return undefined;
-  const ms = Date.parse(ts);
-  if (Number.isNaN(ms)) return undefined;
-  return Math.floor(ms / 1000);
-};
+export const fromTimestamp = (ts: any): number | undefined => {
+  if (ts === null || ts === undefined) return undefined;
+  // 兼容：RFC3339 字符串（含 9 位纳秒）/ proto Timestamp 对象 {seconds,nanos} / 数字（秒或毫秒）
+  if (typeof ts === "string") {
+    let s = ts.trim().replace(/(\.\d{3})\d+/, "$1"); // JS 只认 3 位小数
+    let ms = Date.parse(s);
+    if (Number.isNaN(ms)) ms = Date.parse(s.replace(" ", "T"));
+    if (Number.isNaN(ms)) ms = Date.parse(s + "Z");
+    return Number.isNaN(ms) ? undefined : Math.floor(ms / 1000);
+  }
+  if (typeof ts === "number") {
+    if (!Number.isFinite(ts)) return undefined;
+    return ts > 1e12 ? Math.floor(ts / 1000) : Math.floor(ts);
+  }
+  if (typeof ts === "object") {
+    const seconds = Number((ts as any).seconds ?? NaN);
+    if (Number.isFinite(seconds)) return Math.floor(seconds);
+    const millis = Number((ts as any).millis ?? NaN);
+    if (Number.isFinite(millis)) return Math.floor(millis / 1000);
+  }
+  return undefined;
+}

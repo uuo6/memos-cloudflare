@@ -332,7 +332,6 @@ rpc("MemoService", "UpdateMemo", "required", async (req, ctx) => {
       case "pinned": {
         sets.push("pinned = ?");
         params.push(memo.pinned ? 1 : 0);
-        // 记录「置顶操作时间」，用于按置顶先后排序
         if (memo.pinned) {
           sets.push("pinned_ts = ?");
           params.push(Math.floor(Date.now() / 1000));
@@ -349,14 +348,16 @@ rpc("MemoService", "UpdateMemo", "required", async (req, ctx) => {
       }
       case "create_time": {
         const ts = fromTimestamp(memo.createTime);
-        if (ts == null) throw invalidArgument("invalid create_time");
+        // 客户端可能只在 mask 里标记字段而未提供值：此时跳过，不报错
+        if (ts == null) break;
         sets.push("created_ts = ?");
         params.push(ts);
         break;
       }
       case "update_time": {
         const ts = fromTimestamp(memo.updateTime);
-        if (ts == null) throw invalidArgument("invalid update_time");
+        // 同上：未提供值则忽略该字段
+        if (ts == null) break;
         sets.push("updated_ts = ?");
         params.push(ts);
         updateTimeSet = true;
