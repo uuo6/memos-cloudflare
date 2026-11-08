@@ -33,14 +33,19 @@ const decodeBase64 = (input: string): Uint8Array => {
   return Uint8Array.from(bin, (ch) => ch.charCodeAt(0));
 };
 
-/** 读 STORAGE 设置中的 uploadSizeLimitMb(默认 32)。 */
+/**
+ * 读 STORAGE 设置中的 uploadSizeLimitMb(默认 32 MiB)。
+ * 注意:该字段在 proto 里是 int64,protobuf-es 的 toJSON 会把 int64 序列化成字符串,
+ * 所以 D1 里存的是 "2" 这种字符串。只认 typeof === "number" 会导致后台保存的值
+ * 永远被判为非法而回退到默认值,即「设置最大上传大小不生效」。
+ */
 const getUploadSizeLimitBytes = async (env: Env): Promise<number> => {
   const row = await env.DB.prepare("SELECT value FROM system_setting WHERE name = 'STORAGE'").first<{ value: string }>();
   const setting = safeParse(row?.value);
-  const mb = typeof setting.uploadSizeLimitMb === "number" && setting.uploadSizeLimitMb > 0
-    ? setting.uploadSizeLimitMb
-    : DEFAULT_UPLOAD_LIMIT_MB;
-  return mb * 1024 * 1024;
+  const raw = setting.uploadSizeLimitMb;
+  const parsed = typeof raw === "number" ? raw : typeof raw === "string" ? Number.parseFloat(raw) : Number.NaN;
+  const limitMb = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_UPLOAD_LIMIT_MB;
+  return Math.floor(limitMb * 1024 * 1024);
 };
 
 const getAttachmentByUid = (env: Env, uid: string) =>
@@ -147,7 +152,7 @@ rpc("AttachmentService", "ListAttachments", "required", async (request, ctx) => 
 
   // 范围:本人的附件;ADMIN 可见全部。支持 filter(附件库「清理未使用」依赖 memo_id == null)
   const filterClauses: string[] = [];
-  for (const rawPart of (request.filter || "").split("&&").map((s) => s.trim()).filter(Boolean)) {
+  for (const rawPart of (request.filter || "").split("&&").map((s: string) => s.trim()).filter(Boolean)) {
     if (/^memo_id\s*==\s*null$/i.test(rawPart)) {
       // 孤儿：未关联任何备忘，或关联的备忘已不存在
       filterClauses.push("(a.memo_id IS NULL OR a.memo_id NOT IN (SELECT id FROM memo))");

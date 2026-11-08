@@ -146,6 +146,16 @@ const preserveInputOnlyFields = (key: SettingKey, next: Record<string, any>, old
   }
 };
 
+/**
+ * proto3 的 int64 字段在 JSON 里是字符串(protobuf-es 的 toJSON 行为),
+ * 入库前统一转成 number,避免只认 number 的下游代码(如附件大小限制)读不到。
+ */
+const normalizeInt64Fields = (key: SettingKey, next: Record<string, any>): void => {
+  if (key === "STORAGE" && typeof next.uploadSizeLimitMb === "string") {
+    const parsed = Number.parseFloat(next.uploadSizeLimitMb);
+    if (Number.isFinite(parsed)) next.uploadSizeLimitMb = parsed;
+  }
+};
 rpc("InstanceService", "UpdateInstanceSetting", "required", async (request, ctx) => {
   if (!isAdmin(ctx.auth)) throw permissionDenied();
 
@@ -159,6 +169,7 @@ rpc("InstanceService", "UpdateInstanceSetting", "required", async (request, ctx)
     .first<{ value: string }>();
   const old = oldRow ? safeParse(oldRow.value) : {};
   preserveInputOnlyFields(key, next, old);
+  normalizeInt64Fields(key, next);
 
   await ctx.env.DB.prepare("INSERT OR REPLACE INTO system_setting (name, value) VALUES (?, ?)")
     .bind(key, JSON.stringify(next))
