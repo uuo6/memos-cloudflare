@@ -145,9 +145,24 @@ rpc("AttachmentService", "ListAttachments", "required", async (request, ctx) => 
   const auth = ctx.auth!;
   const { limit, offset } = resolvePage(request);
 
-  // 范围:本人的附件;ADMIN 可见全部(规格书 §2.7)。filter 暂不支持(前端主要靠客户端分组)。
-  const where = auth.role === "ADMIN" ? "" : " WHERE a.creator_id = ?";
-  const params = auth.role === "ADMIN" ? [] : [auth.userId];
+  // 范围:本人的附件;ADMIN 可见全部。支持 filter(附件库「清理未使用」依赖 memo_id == null)
+  const filterClauses: string[] = [];
+  for (const rawPart of (request.filter || "").split("&&").map((s) => s.trim()).filter(Boolean)) {
+    if (/^memo_id\s*==\s*null$/i.test(rawPart)) {
+      // 孤儿：未关联任何备忘，或关联的备忘已不存在
+      filterClauses.push("(a.memo_id IS NULL OR a.memo_id NOT IN (SELECT id FROM memo))");
+    } else if (/^memo_id\s*!=\s*null$/i.test(rawPart)) {
+      filterClauses.push("(a.memo_id IS NOT NULL AND a.memo_id IN (SELECT id FROM memo))");
+    }
+    // 其它过滤条件暂不支持，忽略以免破坏前端页面
+  }
+  const conditions: string[] = [...filterClauses];
+  const params: unknown[] = [];
+  if (auth.role !== "ADMIN") {
+    conditions.push("a.creator_id = ?");
+    params.push(auth.userId);
+  }
+  const where = conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : "";
 
   const [rows, count] = await Promise.all([
     ctx.env.DB.prepare(`${ATTACHMENT_SELECT}${where} ORDER BY ${parseOrderBy(request.orderBy)} LIMIT ? OFFSET ?`)

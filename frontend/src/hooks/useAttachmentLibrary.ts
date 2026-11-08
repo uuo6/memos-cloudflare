@@ -149,23 +149,23 @@ export function useAttachmentLibrary(locale: string) {
 
   const mediaItems = useMemo(
     () =>
-      buildAttachmentVisualItems(linkedAttachments.filter(isVisualAttachment))
+      buildAttachmentVisualItems(attachments.filter(isVisualAttachment))
         .map((item) => toLibraryMediaItem(item, locale, t("attachment-library.labels.live-photo")))
         .sort((a, b) => sortByNewest(a.createdAt, b.createdAt)),
-    [linkedAttachments, locale, t],
+    [attachments, locale, t],
   );
 
   const documentItems = useMemo(
     () =>
-      linkedAttachments
+      attachments
         .filter((attachment) => !isVisualAttachment(attachment) && !isAudioAttachment(attachment))
         .map((attachment) => toLibraryListItem(attachment, locale)),
-    [linkedAttachments, locale],
+    [attachments, locale],
   );
 
   const audioItems = useMemo(
-    () => linkedAttachments.filter(isAudioAttachment).map((attachment) => toLibraryListItem(attachment, locale)),
-    [linkedAttachments, locale],
+    () => attachments.filter(isAudioAttachment).map((attachment) => toLibraryListItem(attachment, locale)),
+    [attachments, locale],
   );
 
   const unusedItems = useMemo(

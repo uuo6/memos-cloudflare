@@ -66,7 +66,7 @@ export const AttachmentLibraryUnusedPanel = ({ count, isDeleting, isExpanded, on
           <Button type="button" variant="outline" className="rounded-full border-amber-300/70 bg-background/80 px-3" onClick={onToggle}>
             {isExpanded ? t("common.close") : t("attachment-library.labels.unused")}
           </Button>
-          <Button variant="destructive" className="rounded-full" onClick={onDelete} disabled={isDeleting}>
+          <Button variant="destructive" className="rounded-full" onClick={onDelete} disabled={isDeleting || count === 0}>
             {isDeleting ? <LoaderCircleIcon className="h-4 w-4 animate-spin" /> : null}
             {t("resource.delete-all-unused")}
           </Button>

@@ -47,4 +47,28 @@ maintenanceRoutes.post("/orphans", async (c) => {
   return c.json({ removedRows: list.length, removedFiles });
 });
 
+/**
+ * 兜底：R2 里存在、但数据库里已无对应记录的对象（例如上传中断/手工删行留下的）
+ * POST /api/v1/maintenance/r2-orphans?max=500
+ */
+maintenanceRoutes.post("/r2-orphans", async (c) => {
+  if (!c.env.R2) return c.json({ message: "R2 not configured" }, 400);
+  const max = Math.min(Number(c.req.query("max") || 500), 2000);
+  const db = await c.env.DB.prepare("SELECT reference FROM attachment").all<{ reference: string }>();
+  const keep = new Set((db.results ?? []).map((r) => r.reference).filter(Boolean));
+
+  const list = await c.env.R2.list({ limit: Math.min(max, 1000) });
+  const removed: string[] = [];
+  for (const obj of list.objects) {
+    if (!keep.has(obj.key)) {
+      try {
+        await c.env.R2.delete(obj.key);
+        removed.push(obj.key);
+      } catch {
+        // 忽略单个失败
+      }
+    }
+  }
+  return c.json({ scanned: list.objects.length, removed: removed.length, keys: removed.slice(0, 20) });
+});
 export { maintenanceRoutes };

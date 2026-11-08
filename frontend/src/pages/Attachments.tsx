@@ -93,11 +93,7 @@ const Attachments = () => {
 
   const currentItemsCount = useMemo(() => TAB_COUNT_SELECTOR[activeTab](stats), [activeTab, stats]);
 
-  useEffect(() => {
-    if (stats.unused === 0) {
-      setShowUnusedSection(false);
-    }
-  }, [stats.unused]);
+
 
   const handlePreview = (itemId: string) => {
     const initialIndex = mediaPreviewItems.findIndex((item) => item.id === itemId);
@@ -162,7 +158,7 @@ const Attachments = () => {
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-5 px-4 sm:gap-6 sm:px-6">
         <AttachmentLibraryToolbar activeTab={activeTab} onTabChange={setActiveTab} stats={stats} />
 
-        {stats.unused > 0 && (
+        {(
           <AttachmentLibraryUnusedPanel
             count={stats.unused}
             isDeleting={isDeletingUnused}
@@ -173,7 +169,15 @@ const Attachments = () => {
         )}
 
         <div className="min-h-[16rem] pt-1">
-          {renderContent()}
+          {showUnusedSection ? (
+            stats.unused > 0 ? (
+              <AttachmentUnusedRows items={unusedItems} />
+            ) : (
+              <div className="py-10 text-center text-sm text-muted-foreground">{t("resource.no-unused-resources")}</div>
+            )
+          ) : (
+            renderContent()
+          )}
 
           {hasNextPage && (
             <div className="mt-6 flex justify-center">
@@ -189,12 +193,7 @@ const Attachments = () => {
           )}
         </div>
 
-        {showUnusedSection && stats.unused > 0 && (
-          <div className="space-y-4 pt-1">
-            <div className="text-sm font-medium text-foreground">{t("attachment-library.unused.title")}</div>
-            <AttachmentUnusedRows items={unusedItems} />
-          </div>
-        )}
+
       </div>
 
       <ConfirmDialog
