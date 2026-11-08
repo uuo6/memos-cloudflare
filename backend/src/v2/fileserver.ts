@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { Env } from "../types";
-import { authenticate } from "./auth";
+import { authenticate, authenticateByCookie, verifyAttachmentSig } from "./auth";
 
 // 对齐上游 server/router/fileserver：GET /file/attachments/{uid}/{filename}
 // - PUBLIC 可见性的 memo 附件无需认证
@@ -31,10 +31,14 @@ export function mountFileServer(app: Hono<{ Bindings: Env }>) {
     if (!row) return c.text("attachment not found", 404);
 
     if (row.visibility !== "PUBLIC") {
-      const auth = await authenticate(c.req.raw, c.env);
-      if (!auth) return c.text("unauthenticated", 401);
-      if (auth.userId !== row.creator_id && row.visibility !== "PROTECTED") {
-        return c.text("permission denied", 403);
+      const sig = c.req.query("sig");
+      const signedOk = sig ? await verifyAttachmentSig(c.env, uid, sig) : false;
+      if (!signedOk) {
+        const auth = (await authenticate(c.req.raw, c.env)) ?? (await authenticateByCookie(c.req.raw, c.env));
+        if (!auth) return c.text("unauthenticated", 401);
+        if (auth.userId !== row.creator_id && row.visibility !== "PROTECTED") {
+          return c.text("permission denied", 403);
+        }
       }
     }
 

@@ -70,6 +70,25 @@ app.get('/health', (c) => {
   });
 });
 
+// ===== 轻量调试日志：只记录写操作和失败请求 =====
+let reqLogReady2 = false;
+app.use('/api/*', async (c, next) => {
+  await next();
+  const isWrite = ['POST', 'PATCH', 'PUT', 'DELETE'].includes(c.req.method);
+  if (!isWrite && c.res.status < 400) return;
+  try {
+    if (!reqLogReady2) {
+      await c.env.DB.prepare(
+        'CREATE TABLE IF NOT EXISTS req_log (id INTEGER PRIMARY KEY AUTOINCREMENT, method TEXT, path TEXT, status INTEGER, ua TEXT, ts INTEGER)',
+      ).run();
+      reqLogReady2 = true;
+    }
+    const url = new URL(c.req.url);
+    await c.env.DB.prepare('INSERT INTO req_log (method, path, status, ua, ts) VALUES (?, ?, ?, ?, ?)')
+      .bind(c.req.method, url.pathname + (url.search ? url.search.slice(0, 100) : ''), c.res.status, (c.req.header('user-agent') || '').slice(0, 60), Math.floor(Date.now() / 1000))
+      .run();
+  } catch {}
+});
 // ===== v2: Connect JSON API（对齐上游 Memos v0.29，前端 v0.29.1 使用） =====
 mountConnectRoutes(app);
 mountFileServer(app);
@@ -99,6 +118,24 @@ app.route('/api/tag', tagRoutes);
 app.route('/api/resource', resourceRoutes);
 app.route('/api/webhook', webhookRoutes);
 
+// ===== 旧版（0.21 风格）REST 也挂到 /api/v1，供 Moe Memos 等按 0.21 协议访问的客户端 =====
+app.route('/api/v1/auth', authRoutes);
+app.route('/api/v1/workspace', workspaceRoutes);
+app.use('/api/v1/user/*', authMiddleware);
+app.use('/api/v1/tag/*', authMiddleware);
+app.use('/api/v1/resource/*', authMiddleware);
+app.use('/api/v1/memo', authMiddleware);
+app.use('/api/v1/memo/*', authMiddleware);
+app.route('/api/v1/user', userRoutes);
+app.route('/api/v1/memo', memoRoutes);
+app.route('/api/v1/tag', tagRoutes);
+app.route('/api/v1/resource', resourceRoutes);
+// ===== REST v1 网关（/api/v1/*，供 Moe Memos 等第三方客户端） =====
+import { restV1 } from './routes/rest_v1';
+app.route('/api/v1', restV1);
+
+// 兼容 Memos 26.x 的「无版本号」/api/* 路径（Moe Memos 探测与部分客户端会用到）
+app.route('/api', restV1);
 // 文件下载路由 (不在 /api 下)
 app.get('/o/r/:uid/:filename', async (c) => {
   try {

@@ -17,25 +17,13 @@ const workspaceRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
 
 // 获取workspace profile
 workspaceRoutes.get('/profile', async (c) => {
-  try {
-    // 获取第一个注册的用户作为owner
-    const owner = await c.env.DB.prepare(
-      'SELECT uid FROM user WHERE role = ? ORDER BY created_ts ASC LIMIT 1'
-    ).bind('HOST').first();
-
-    return c.json({
-      owner: owner ? `users/${owner.uid}` : '',
-      version: '0.24.0-cloudflare',
-      mode: 'prod',
-      instanceUrl: new URL(c.req.url).origin
-    });
-  } catch (error) {
-    console.error('Get workspace profile error:', error);
-    return c.json({ message: 'Internal server error' }, 500);
-  }
+  // 0.21 风格的 workspace profile：第三方客户端只用来判断可用性
+  return c.json({
+    version: c.env.APP_VERSION || '0.29.1',
+    demo: false,
+    host: new URL(c.req.url).origin,
+  });
 });
-
-// 获取workspace setting
 workspaceRoutes.get('/setting', async (c) => {
   try {
     const url = new URL(c.req.url);

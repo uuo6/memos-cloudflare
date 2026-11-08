@@ -27,6 +27,20 @@ export function rpc(service: string, method: string, auth: AuthPolicy, handler: 
   registry.set(`memos.api.v1.${service}/${method}`, { handler, auth });
 }
 
+/**
+ * 供 REST 网关（/api/v1/*）内部调用：按 `memos.api.v1.<Service>/<Method>` 分发到已注册的 RPC handler。
+ * 与 Connect 路由共用鉴权策略，抛出的 ConnectError 由调用方转成 HTTP 状态码。
+ */
+export async function invokeRpc(
+  key: string,
+  body: unknown,
+  ctx: RpcContext,
+): Promise<Record<string, unknown>> {
+  const registration = registry.get(key);
+  if (!registration) throw unimplemented(key);
+  if (registration.auth === "required" && !ctx.auth) throw unauthenticated();
+  return (await registration.handler(body ?? {}, ctx)) ?? {};
+}
 /** 挂载 Connect JSON 路由。所有 RPC 都是 POST /memos.api.v1.<Service>/<Method> */
 export function mountConnectRoutes(app: Hono<{ Bindings: Env }>) {
   // 路径形如 /memos.api.v1.MemoService/ListMemos。“.”不是段分隔符，

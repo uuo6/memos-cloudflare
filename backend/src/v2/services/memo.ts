@@ -269,7 +269,19 @@ rpc("MemoService", "UpdateMemo", "required", async (req, ctx) => {
   const row = await getMemoOrThrow(ctx.env, uid);
   if (!canManage(auth, row)) throw permissionDenied();
 
-  const paths: string[] = Array.isArray(req.updateMask?.paths) ? req.updateMask.paths : [];
+  let paths: string[] = Array.isArray(req.updateMask?.paths) ? req.updateMask.paths : [];
+  // 兼容上游：未提供 updateMask 时，按请求里实际携带的字段推断（网页端部分编辑流程不带 mask）
+  if (paths.length === 0) {
+    const fields: Array<[string, unknown]> = [
+      ["content", memo.content],
+      ["visibility", memo.visibility],
+      ["pinned", memo.pinned],
+      ["state", memo.state],
+      ["attachments", memo.attachments],
+      ["location", memo.location],
+    ];
+    for (const [key, value] of fields) if (value !== undefined && value !== null) paths.push(key);
+  }
   if (paths.length === 0) throw invalidArgument("update_mask is required");
 
   const sets: string[] = [];

@@ -195,6 +195,39 @@ const sha256hex = async (input: string): Promise<string> => {
     .join("");
 };
 
+/** 附件外链签名：HMAC(uid, JWT_SECRET)，用于 <img>/OkHttp 等无法带鉴权头的场景 */
+export const signAttachment = async (env: Env, uid: string): Promise<string> => {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(env.JWT_SECRET),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`attachment:${uid}`));
+  return btoa(String.fromCharCode(...new Uint8Array(sig))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+};
+
+export const verifyAttachmentSig = async (env: Env, uid: string, sig: string): Promise<boolean> => {
+  const expected = await signAttachment(env, uid);
+  return sig === expected;
+};
+/** 基于 HttpOnly cookie（memos_refresh）的鉴权，供浏览器 <img> 等无法带 Bearer 的场景使用 */
+export const authenticateByCookie = async (req: Request, env: Env): Promise<AuthContext | null> => {
+  const cookieHeader = req.headers.get("cookie") || "";
+  const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${REFRESH_TOKEN_COOKIE}=([^;]+)`));
+  if (!match) return null;
+  const token = decodeURIComponent(match[1]);
+  const claims = await verifyJwt(token, env.JWT_SECRET);
+  if (!claims || !Array.isArray(claims.aud) || !claims.aud.includes(REFRESH_AUDIENCE)) return null;
+  const userId = Number(claims.sub);
+  if (!Number.isFinite(userId)) return null;
+  const row = await env.DB.prepare("SELECT id, username, role, row_status FROM user WHERE id = ?")
+    .bind(userId)
+    .first<{ id: number; username: string; role: string; row_status: string }>();
+  if (!row || row.row_status !== "NORMAL") return null;
+  return { userId: row.id, username: row.username, role: row.role } as AuthContext;
+};
 export const authenticate = async (req: Request, env: Env): Promise<AuthContext | null> => {
   const authHeader = req.headers.get("Authorization");
   if (!authHeader?.startsWith("Bearer ")) return null;

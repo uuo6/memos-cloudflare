@@ -28,26 +28,27 @@ userRoutes.get('/me', async (c) => {
 
     // 查询完整用户信息
     const user = await c.env.DB.prepare(
-      'SELECT * FROM user WHERE uid = ? AND row_status = ?'
-    ).bind(userPayload.sub, 'NORMAL').first();
+      'SELECT * FROM user WHERE username = ? AND row_status = ?'
+    ).bind((userPayload as any).username || userPayload.sub, 'NORMAL').first();
 
     if (!user) {
       return c.json({ message: 'User not found' }, 404);
     }
 
     // 返回用户信息（不包括密码哈希）
+    // 字段严格对齐第三方客户端的 MemosV0User 模型（缺键会反序列化失败）
     const userResponse = {
-      id: user.id,
-      uid: user.uid,
-      username: user.username,
-      nickname: user.nickname,
-      role: user.role,
-      email: user.email,
-      avatarUrl: user.avatar_url,
-      description: user.description,
-      rowStatus: user.row_status,
       createdTs: user.created_ts,
-      updatedTs: user.updated_ts
+      email: user.email ?? null,
+      id: user.id,
+      name: user.nickname ?? user.username,
+      role: user.role,
+      rowStatus: user.row_status,
+      updatedTs: user.updated_ts ?? null,
+      userSettingList: null,
+      nickname: user.nickname ?? null,
+      username: user.username ?? null,
+      avatarUrl: user.avatar_url ?? null,
     };
 
     return c.json(userResponse);

@@ -1,463 +1,299 @@
 import { Hono } from 'hono';
-import { v4 as uuidv4 } from 'uuid';
-import { updateMemoTags } from '../utils';
+import { signAttachment } from '../v2/auth';
 
-type Env = {
-  DB: D1Database;
-};
+type Env = { DB: D1Database; JWT_SECRET: string };
 
-interface Variables {
-  user: {
-    sub: string;
-    username: string;
-    role: string;
+const memoRoutes = new Hono<{ Bindings: Env; Variables: any }>();
+
+/** 生成与 v2 一致的 payload 附加信息，保证网页端/App 端看到相同结构 */
+function buildPayload(content: string, tags: string[]) {
+  const hasLink = /https?:\/\//.test(content)
+  const hasTaskList = /(^|\n)\s*[-*]\s*\[[ xX]\]/.test(content)
+  const hasCode = /```/.test(content)
+  const hasIncompleteTasks = /(^|\n)\s*[-*]\s*\[\s\]/.test(content)
+  const plain = content.replace(/```[\s\S]*?```/g, ' ').replace(/[#>*`\-\[\]()!]/g, ' ').replace(/\s+/g, ' ').trim()
+  const title = plain.slice(0, 60)
+  const snippet = plain.slice(0, 120)
+  return JSON.stringify({ tags, property: { hasLink, hasTaskList, hasCode, hasIncompleteTasks, title }, snippet })
+}
+function extractTags(content: string): string[] {
+  const tags = new Set<string>();
+  const re = /(?:^|\s)#([^\s#]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content))) tags.add(m[1]);
+  return [...tags];
+}
+
+function toV0(row: any, creatorName?: string | null, resourceList: any[] = []) {
+  let tags: string[] = [];
+  try {
+    const p = JSON.parse(row.payload || '{}');
+    if (Array.isArray(p.tags)) tags = p.tags;
+  } catch {}
+  // 字段严格对齐 MemosV0Memo 模型
+  return {
+    id: row.id,
+    createdTs: row.created_ts,
+    creatorId: row.creator_id,
+    creatorName: creatorName ?? null,
+    content: row.content ?? '',
+    pinned: !!row.pinned,
+    rowStatus: row.row_status,
+    updatedTs: row.updated_ts,
+    visibility: row.visibility,
+    resourceList,
   };
 }
 
-const memoRoutes = new Hono<{ Bindings: Env; Variables: Variables }>();
+async function currentUser(c: any) {
+  const payload = c.get('user');
+  const row = await c.env.DB.prepare('SELECT * FROM user WHERE username = ?').bind(payload?.username || payload?.sub).first<any>();
+  return row;
+}
 
-// 创建笔记
+memoRoutes.get('/', async (c) => {
+  try {
+    const url = new URL(c.req.url);
+    const limit = parseInt(url.searchParams.get('limit') || '50');
+    const offset = parseInt(url.searchParams.get('offset') || '0');
+    const creatorId = url.searchParams.get('creatorId');
+    const visibility = url.searchParams.get('visibility');
+    const tag = url.searchParams.get('tag');
+    const rowStatus = url.searchParams.get('rowStatus') || 'NORMAL';
+
+    let sql = 'SELECT * FROM memo WHERE row_status = ?';
+    const params: any[] = [rowStatus];
+    if (creatorId) { sql += ' AND creator_id = ?'; params.push(Number(creatorId)); }
+    if (visibility) { sql += ' AND visibility = ?'; params.push(visibility); }
+    sql += ' ORDER BY created_ts DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+
+    const rows = await c.env.DB.prepare(sql).bind(...params).all<any>();
+    const users = await c.env.DB.prepare('SELECT id, nickname, username FROM user').all<any>();
+    const nameMap = new Map<number, string>();
+    for (const u of users.results ?? []) nameMap.set(u.id, u.nickname || u.username);
+    const ids = (rows.results ?? []).map((r: any) => r.id);
+    const atts = ids.length
+      ? await c.env.DB.prepare(
+          `SELECT id, uid, filename, type, size, created_ts, updated_ts, creator_id, memo_id FROM attachment WHERE memo_id IN (${ids.map(() => '?').join(',')})`,
+        ).bind(...ids).all<any>()
+      : { results: [] as any[] };
+    const byMemo = new Map<number, any[]>();
+    for (const a of (atts.results ?? []) as any[]) {
+      const list = byMemo.get(a.memo_id) ?? [];
+      const sig = await signAttachment(c.env as any, a.uid);
+      list.push({
+        id: a.id,
+        uid: a.uid,
+        filename: a.filename,
+        type: a.type,
+        size: a.size,
+        createdTs: a.created_ts,
+        updatedTs: a.updated_ts,
+        creatorId: a.creator_id,
+        externalLink: `${new URL(c.req.url).origin}/file/attachments/${a.uid}/${encodeURIComponent(a.filename)}?sig=${sig}`,
+        publicId: null,
+        name: null,
+      });
+      byMemo.set(a.memo_id, list);
+    }
+    let memos = (rows.results ?? []).map((r: any) => toV0(r, nameMap.get(r.creator_id), byMemo.get(r.id) ?? []));
+    if (tag) memos = memos.filter((m: any) => m.tags.includes(tag));
+    return c.json(memos);
+  } catch (error: any) {
+    console.error('List memos error:', error);
+    return c.json({ message: 'Internal server error' }, 500);
+  }
+});
+
+memoRoutes.get('/all', async (c) => {
+  try {
+    const url = new URL(c.req.url);
+    const limit = parseInt(url.searchParams.get('limit') || '50');
+    const offset = parseInt(url.searchParams.get('offset') || '0');
+    const visibility = url.searchParams.get('visibility');
+    const pinnedRaw = url.searchParams.get('pinned');
+    const tag = url.searchParams.get('tag');
+
+    // 「发现/公开」场景：未显式指定 creatorId 时，一律只暴露公开或受保护内容，避免私有备忘外泄
+    const creatorId = url.searchParams.get('creatorId');
+    const rowStatusParam = url.searchParams.get('rowStatus') || 'NORMAL';
+    let sql = `SELECT * FROM memo WHERE row_status = ?`;
+    const params: any[] = [rowStatusParam];
+    if (visibility) {
+      sql += ' AND visibility = ?'; params.push(visibility);
+    } else if (!creatorId) {
+      sql += " AND visibility IN ('PUBLIC','PROTECTED')";
+    }
+    if (creatorId) { sql += ' AND creator_id = ?'; params.push(Number(creatorId)); }
+    if (pinnedRaw === 'true' || pinnedRaw === 'false') { sql += ' AND pinned = ?'; params.push(pinnedRaw === 'true' ? 1 : 0); }
+    sql += ' ORDER BY created_ts DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+
+    const rows = await c.env.DB.prepare(sql).bind(...params).all<any>();
+    const users = await c.env.DB.prepare('SELECT id, nickname, username FROM user').all<any>();
+    const nameMap = new Map<number, string>();
+    for (const u of users.results ?? []) nameMap.set(u.id, u.nickname || u.username);
+
+    const ids = (rows.results ?? []).map((r: any) => r.id);
+    const atts = ids.length
+      ? await c.env.DB.prepare(
+          `SELECT id, uid, filename, type, size, created_ts, updated_ts, creator_id, memo_id FROM attachment WHERE memo_id IN (${ids.map(() => '?').join(',')})`,
+        ).bind(...ids).all<any>()
+      : { results: [] as any[] };
+    const origin = new URL(c.req.url).origin;
+    const byMemo = new Map<number, any[]>();
+    for (const a of (atts.results ?? []) as any[]) {
+      const list = byMemo.get(a.memo_id) ?? [];
+      list.push({
+        id: a.id,
+        uid: a.uid,
+        filename: a.filename,
+        type: a.type,
+        size: a.size,
+        createdTs: a.created_ts,
+        updatedTs: a.updated_ts,
+        creatorId: a.creator_id,
+        externalLink: `${origin}/file/attachments/${a.uid}/${encodeURIComponent(a.filename)}?sig=${await signAttachment(c.env as any, a.uid)}`,
+        publicId: null,
+        name: null,
+      });
+      byMemo.set(a.memo_id, list);
+    }
+
+    let memos = (rows.results ?? []).map((r: any) => toV0(r, nameMap.get(r.creator_id), byMemo.get(r.id) ?? []));
+    if (tag) memos = memos.filter((m: any) => (m.content || '').includes(`#${tag}`));
+    return c.json(memos);
+  } catch (error: any) {
+    console.error('List all memos error:', error);
+    return c.json({ message: 'Internal server error' }, 500);
+  }
+});
+
+memoRoutes.get('/stats', async (c) => {
+  const row = await c.env.DB.prepare("SELECT COUNT(*) AS total FROM memo WHERE row_status = 'NORMAL'").first<any>();
+  return c.json({ total: row?.total ?? 0 });
+});
+
+memoRoutes.get('/:id', async (c) => {
+  const row = await c.env.DB.prepare('SELECT * FROM memo WHERE id = ?').bind(Number(c.req.param('id'))).first<any>();
+  if (!row) return c.json({ message: 'Memo not found' }, 404);
+  return c.json(toV0(row));
+});
+
 memoRoutes.post('/', async (c) => {
   try {
-    const userPayload = c.get('user');
-    if (!userPayload) {
-      return c.json({ message: 'Unauthorized' }, 401);
-    }
-
-    const { content, visibility = 'PRIVATE', resourceIdList = [], resources = [] } = await c.req.json();
-    
-    if (!content) {
-      return c.json({ message: 'Content is required' }, 400);
-    }
-
-    const memoUid = uuidv4();
+    const user = await currentUser(c);
+    if (!user) return c.json({ message: 'Unauthorized' }, 401);
+    const body = await c.req.json().catch(() => ({}) as any);
+    const content = String(body.content ?? '');
     const now = Math.floor(Date.now() / 1000);
-
-    // 获取用户ID
-    const user = await c.env.DB.prepare(
-      'SELECT id FROM user WHERE uid = ?'
-    ).bind(userPayload.sub).first();
-
-    if (!user) {
-      return c.json({ message: 'User not found' }, 404);
+    const createdTs = Number(body.createdTs ?? now);
+    const uid = crypto.randomUUID().replace(/-/g, '').slice(0, 20);
+    const visibility = body.visibility ?? 'PRIVATE';
+    const pinned = body.pinned ? 1 : 0;
+    const tags = extractTags(content);
+    const payload = buildPayload(content, tags);
+    const res = await c.env.DB.prepare(
+      'INSERT INTO memo (uid, creator_id, created_ts, updated_ts, row_status, content, visibility, pinned, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).bind(uid, user.id, createdTs, now, 'NORMAL', content, visibility, pinned, payload).run();
+    const id = Number(res.meta?.last_row_id);
+    const resourceIds: number[] = Array.isArray(body.resourceIdList) ? body.resourceIdList.map(Number).filter(Number.isFinite) : [];
+    if (resourceIds.length) {
+      await c.env.DB.prepare(
+        `UPDATE attachment SET memo_id = ? WHERE id IN (${resourceIds.map(() => '?').join(',')})`,
+      ).bind(id, ...resourceIds).run();
     }
-
-    // 创建笔记
-    const memoResult = await c.env.DB.prepare(`
-      INSERT INTO memo (uid, creator_id, content, visibility, row_status, created_ts, updated_ts)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).bind(memoUid, user.id, content, visibility, 'NORMAL', now, now).run();
-
-    if (!memoResult.success) {
-      throw new Error('Failed to create memo');
-    }
-
-    const memoId = memoResult.meta.last_row_id;
-
-    // 处理资源关联 - 支持两种格式
-    let finalResourceIdList = resourceIdList;
-    
-    // 如果传入的是 resources 数组（Resource对象），需要转换为ID
-    if (resources.length > 0) {
-      console.log('🔄 Converting resources to resource IDs...');
-      const resourceIds = [];
-      
-      for (const resource of resources) {
-        // 从资源名称中提取UID，格式：resources/{uid}
-        const resourceUid = resource.name?.split('/').pop();
-        if (resourceUid) {
-          const dbResource = await c.env.DB.prepare(
-            'SELECT id FROM resource WHERE uid = ?'
-          ).bind(resourceUid).first();
-          
-          if (dbResource) {
-            resourceIds.push(dbResource.id);
-            console.log(`✅ Found resource ID ${dbResource.id} for UID ${resourceUid}`);
-          } else {
-            console.log(`❌ Resource not found for UID ${resourceUid}`);
-          }
-        }
-      }
-      
-      finalResourceIdList = resourceIds;
-      console.log('🔄 Final resource ID list:', finalResourceIdList);
-    }
-
-    // 关联资源
-    if (finalResourceIdList.length > 0) {
-      for (const resourceId of finalResourceIdList) {
-        await c.env.DB.prepare(`
-          INSERT INTO memo_resource (memo_id, resource_id) VALUES (?, ?)
-        `).bind(memoId, resourceId).run();
-      }
-    }
-
-    // 自动提取并创建标签
-    try {
-      await updateMemoTags(c.env.DB, memoId as number, user.id as number, content);
-    } catch (error) {
-      console.error('Failed to update memo tags:', error);
-      // 标签创建失败不影响memo创建
-    }
-
-    // 获取创建的笔记信息
-    const newMemo = await getMemoWithDetails(c.env.DB, memoId);
-    
-    return c.json(newMemo);
-
-  } catch (error) {
+    const row = await c.env.DB.prepare('SELECT * FROM memo WHERE id = ?').bind(id).first<any>();
+    const atts = await c.env.DB.prepare(
+      'SELECT id, uid, filename, type, size, created_ts, updated_ts, creator_id FROM attachment WHERE memo_id = ?',
+    ).bind(id).all<any>();
+    const origin = new URL(c.req.url).origin;
+    const resourceList = await Promise.all((atts.results ?? []).map(async (a: any) => ({
+      id: a.id, uid: a.uid, filename: a.filename, type: a.type, size: a.size,
+      createdTs: a.created_ts, updatedTs: a.updated_ts, creatorId: a.creator_id,
+      externalLink: `${origin}/file/attachments/${a.uid}/${encodeURIComponent(a.filename)}?sig=${await signAttachment(c.env as any, a.uid)}`,
+      publicId: null, name: null,
+    })));
+    return c.json(toV0(row, null, resourceList));
+  } catch (error: any) {
     console.error('Create memo error:', error);
     return c.json({ message: 'Internal server error' }, 500);
   }
 });
 
-// 获取笔记列表
-memoRoutes.get('/', async (c) => {
-  try {
-    const url = new URL(c.req.url);
-    const rowStatus = url.searchParams.get('rowStatus') || 'NORMAL';
-    const creatorId = url.searchParams.get('creatorId');
-    const tag = url.searchParams.get('tag');
-    const visibility = url.searchParams.get('visibility');
-    const limit = parseInt(url.searchParams.get('limit') || '50');
-    const offset = parseInt(url.searchParams.get('offset') || '0');
-
-    let whereClause = 'WHERE m.row_status = ?';
-    const params = [rowStatus];
-
-    if (creatorId) {
-      whereClause += ' AND m.creator_id = ?';
-      params.push(creatorId);
-    }
-
-    if (visibility) {
-      whereClause += ' AND m.visibility = ?';
-      params.push(visibility);
-    } else {
-      // 默认只显示公开的笔记，除非指定了 creatorId
-      if (!creatorId) {
-        whereClause += ' AND m.visibility = ?';
-        params.push('PUBLIC');
-      }
-    }
-
-    if (tag) {
-      whereClause += ` AND EXISTS (
-        SELECT 1 FROM memo_tag mt 
-        JOIN tag t ON mt.tag_id = t.id 
-        WHERE mt.memo_id = m.id AND t.name = ?
-      )`;
-      params.push(tag);
-    }
-
-    params.push(limit.toString(), offset.toString());
-
-    const memos = await c.env.DB.prepare(`
-      SELECT m.*, u.username as creator_username
-      FROM memo m
-      JOIN user u ON m.creator_id = u.id
-      ${whereClause}
-      ORDER BY m.created_ts DESC
-      LIMIT ? OFFSET ?
-    `).bind(...params).all();
-
-    // 为每个笔记获取详细信息
-    const memosWithDetails = [];
-    for (const memo of memos.results || []) {
-      const memoWithDetails = await getMemoWithDetails(c.env.DB, memo.id as number);
-      memosWithDetails.push(memoWithDetails);
-    }
-
-    return c.json(memosWithDetails);
-
-  } catch (error) {
-    console.error('Get memos error:', error);
-    return c.json({ message: 'Internal server error' }, 500);
-  }
-});
-
-// 获取单个笔记
-memoRoutes.get('/:id', async (c) => {
-  try {
-    const memoId = parseInt(c.req.param('id'));
-    
-    const memo = await c.env.DB.prepare(
-      'SELECT m.*, u.username as creator_username FROM memo m JOIN user u ON m.creator_id = u.id WHERE m.id = ?'
-    ).bind(memoId).first();
-
-    if (!memo) {
-      return c.json({ message: 'Memo not found' }, 404);
-    }
-
-    // 检查访问权限
-    if (memo.visibility === 'PRIVATE') {
-      const userPayload = c.get('user');
-      if (!userPayload || memo.creator_id !== (await getUserIdFromUid(c.env.DB, userPayload.sub))) {
-        return c.json({ message: 'Forbidden' }, 403);
-      }
-    }
-
-    const memoWithDetails = await getMemoWithDetails(c.env.DB, memoId);
-    
-    return c.json(memoWithDetails);
-
-  } catch (error) {
-    console.error('Get memo error:', error);
-    return c.json({ message: 'Internal server error' }, 500);
-  }
-});
-
-// 更新笔记
 memoRoutes.patch('/:id', async (c) => {
   try {
-    const memoId = parseInt(c.req.param('id'));
-    const userPayload = c.get('user');
-    
-    if (!userPayload) {
-      return c.json({ message: 'Unauthorized' }, 401);
+    const id = Number(c.req.param('id'));
+    const body = await c.req.json().catch(() => ({}) as any);
+    const sets: string[] = [];
+    const params: any[] = [];
+    if (typeof body.content === 'string') {
+      sets.push('content = ?'); params.push(body.content);
+      sets.push('payload = ?'); params.push(buildPayload(body.content, extractTags(body.content)));
     }
-
-    const memo = await c.env.DB.prepare(
-      'SELECT * FROM memo WHERE id = ?'
-    ).bind(memoId).first();
-
-    if (!memo) {
-      return c.json({ message: 'Memo not found' }, 404);
+    if (body.visibility) { sets.push('visibility = ?'); params.push(body.visibility); }
+    if (body.rowStatus) { sets.push('row_status = ?'); params.push(body.rowStatus); }
+    if (typeof body.pinned === 'boolean') { sets.push('pinned = ?'); params.push(body.pinned ? 1 : 0); }
+    const resourceIds: number[] = Array.isArray(body.resourceIdList)
+      ? body.resourceIdList.map(Number).filter(Number.isFinite)
+      : [];
+    if (!sets.length && !resourceIds.length) return c.json({ message: 'nothing to update' }, 400);
+    if (sets.length) {
+      sets.push('updated_ts = ?'); params.push(Math.floor(Date.now() / 1000));
+      await c.env.DB.prepare(`UPDATE memo SET ${sets.join(', ')} WHERE id = ?`).bind(...params, id).run();
     }
-
-    const userId = await getUserIdFromUid(c.env.DB, userPayload.sub);
-    if (memo.creator_id !== userId && userPayload.role !== 'HOST') {
-      return c.json({ message: 'Forbidden' }, 403);
-    }
-
-    const { content, visibility, resourceIdList, resources = [] } = await c.req.json();
-    const now = Math.floor(Date.now() / 1000);
-
-    // 构建更新字段
-    const updates = [];
-    const values = [];
-    
-    if (content !== undefined) {
-      updates.push('content = ?');
-      values.push(content);
-    }
-    
-    if (visibility !== undefined) {
-      updates.push('visibility = ?');
-      values.push(visibility);
-    }
-
-    updates.push('updated_ts = ?');
-    values.push(now);
-    values.push(memoId);
-
-    if (updates.length > 1) {
-      await c.env.DB.prepare(`
-        UPDATE memo SET ${updates.join(', ')} WHERE id = ?
-      `).bind(...values).run();
-    }
-
-    // 处理资源关联更新 - 支持两种格式
-    let finalResourceIdList = resourceIdList;
-    
-    // 如果传入的是 resources 数组（Resource对象），需要转换为ID
-    if (resources.length > 0) {
-      console.log('🔄 Converting resources to resource IDs for update...');
-      const resourceIds = [];
-      
-      for (const resource of resources) {
-        // 从资源名称中提取UID，格式：resources/{uid}
-        const resourceUid = resource.name?.split('/').pop();
-        if (resourceUid) {
-          const dbResource = await c.env.DB.prepare(
-            'SELECT id FROM resource WHERE uid = ?'
-          ).bind(resourceUid).first();
-          
-          if (dbResource) {
-            resourceIds.push(dbResource.id);
-            console.log(`✅ Found resource ID ${dbResource.id} for UID ${resourceUid}`);
-          } else {
-            console.log(`❌ Resource not found for UID ${resourceUid}`);
-          }
-        }
-      }
-      
-      finalResourceIdList = resourceIds;
-      console.log('🔄 Final resource ID list for update:', finalResourceIdList);
-    }
-
-    // 更新资源关联
-    if (finalResourceIdList !== undefined) {
-      // 删除现有关联
-      await c.env.DB.prepare(
-        'DELETE FROM memo_resource WHERE memo_id = ?'
-      ).bind(memoId).run();
-
-      // 添加新关联
-      if (finalResourceIdList.length > 0) {
-        for (const resourceId of finalResourceIdList) {
-          await c.env.DB.prepare(`
-            INSERT INTO memo_resource (memo_id, resource_id) VALUES (?, ?)
-          `).bind(memoId, resourceId).run();
-        }
+    if (Array.isArray(body.resourceIdList)) {
+      // 先解绑，再按最新列表绑定
+      await c.env.DB.prepare('UPDATE attachment SET memo_id = NULL WHERE memo_id = ?').bind(id).run();
+      if (resourceIds.length) {
+        await c.env.DB.prepare(
+          `UPDATE attachment SET memo_id = ? WHERE id IN (${resourceIds.map(() => '?').join(',')})`,
+        ).bind(id, ...resourceIds).run();
       }
     }
-
-    // 如果内容更新了，重新提取标签
-    if (content !== undefined && userId) {
-      try {
-        await updateMemoTags(c.env.DB, memoId, userId, content);
-      } catch (error) {
-        console.error('Failed to update memo tags:', error);
-        // 标签更新失败不影响memo更新
-      }
-    }
-
-    const updatedMemo = await getMemoWithDetails(c.env.DB, memoId);
-    
-    return c.json(updatedMemo);
-
-  } catch (error) {
-    console.error('Update memo error:', error);
+    const row = await c.env.DB.prepare('SELECT * FROM memo WHERE id = ?').bind(id).first<any>();
+    const atts = await c.env.DB.prepare(
+      'SELECT id, uid, filename, type, size, created_ts, updated_ts, creator_id FROM attachment WHERE memo_id = ?',
+    ).bind(id).all<any>();
+    const origin = new URL(c.req.url).origin;
+    const resourceList = await Promise.all((atts.results ?? []).map(async (a: any) => ({
+      id: a.id, uid: a.uid, filename: a.filename, type: a.type, size: a.size,
+      createdTs: a.created_ts, updatedTs: a.updated_ts, creatorId: a.creator_id,
+      externalLink: `${origin}/file/attachments/${a.uid}/${encodeURIComponent(a.filename)}?sig=${await signAttachment(c.env as any, a.uid)}`,
+      publicId: null, name: null,
+    })));
+    return c.json(toV0(row, null, resourceList));
+  } catch (error: any) {
+    console.error('Patch memo error:', error);
     return c.json({ message: 'Internal server error' }, 500);
   }
 });
 
-// 删除笔记
+memoRoutes.post('/:id/organizer', async (c) => {
+  try {
+    const id = Number(c.req.param('id'));
+    const body = await c.req.json().catch(() => ({}) as any);
+    await c.env.DB.prepare('UPDATE memo SET pinned = ?, updated_ts = ? WHERE id = ?')
+      .bind(body.pinned ? 1 : 0, Math.floor(Date.now() / 1000), id)
+      .run();
+    // 客户端会把响应体当作 MemosV0Memo 解析，必须返回完整对象
+    const row = await c.env.DB.prepare('SELECT * FROM memo WHERE id = ?').bind(id).first<any>();
+    if (!row) return c.json({ message: 'Memo not found' }, 404);
+    return c.json(toV0(row));
+  } catch (error: any) {
+    console.error('Organizer error:', error);
+    return c.json({ message: 'Internal server error' }, 500);
+  }
+});
+
 memoRoutes.delete('/:id', async (c) => {
   try {
-    const memoId = parseInt(c.req.param('id'));
-    const userPayload = c.get('user');
-    
-    if (!userPayload) {
-      return c.json({ message: 'Unauthorized' }, 401);
-    }
-
-    const memo = await c.env.DB.prepare(
-      'SELECT * FROM memo WHERE id = ?'
-    ).bind(memoId).first();
-
-    if (!memo) {
-      return c.json({ message: 'Memo not found' }, 404);
-    }
-
-    const userId = await getUserIdFromUid(c.env.DB, userPayload.sub);
-    if (memo.creator_id !== userId && userPayload.role !== 'HOST') {
-      return c.json({ message: 'Forbidden' }, 403);
-    }
-
-    // 逻辑删除
-    const now = Math.floor(Date.now() / 1000);
-    await c.env.DB.prepare(`
-      UPDATE memo SET row_status = ?, updated_ts = ? WHERE id = ?
-    `).bind('ARCHIVED', now, memoId).run();
-
-    return c.json({ message: 'Memo deleted successfully' });
-
-  } catch (error) {
-    console.error('Delete memo error:', error);
+    await c.env.DB.prepare('DELETE FROM memo WHERE id = ?').bind(Number(c.req.param('id'))).run();
+    return c.json({});
+  } catch (error: any) {
     return c.json({ message: 'Internal server error' }, 500);
   }
 });
 
-// 获取笔记统计
-memoRoutes.get('/stats', async (c) => {
-  try {
-    // 总数统计
-    const totalResult = await c.env.DB.prepare(
-      'SELECT COUNT(*) as total FROM memo WHERE row_status = ? AND visibility = ?'
-    ).bind('NORMAL', 'PUBLIC').first();
-
-    // 每日统计（最近30天）
-    const thirtyDaysAgo = Math.floor(Date.now() / 1000) - (30 * 24 * 60 * 60);
-    
-    const dailyStats = await c.env.DB.prepare(`
-      SELECT 
-        DATE(created_ts, 'unixepoch') as date,
-        COUNT(*) as count
-      FROM memo 
-      WHERE row_status = ? 
-        AND visibility = ? 
-        AND created_ts > ?
-      GROUP BY DATE(created_ts, 'unixepoch')
-      ORDER BY date DESC
-    `).bind('NORMAL', 'PUBLIC', thirtyDaysAgo).all();
-
-    const dailyHistogram = (dailyStats.results || []).map((row: any) => ({
-      ts: Math.floor(new Date(row.date).getTime() / 1000),
-      count: row.count
-    }));
-
-    return c.json({
-      total: totalResult?.total || 0,
-      dailyHistogram
-    });
-
-  } catch (error) {
-    console.error('Get memo stats error:', error);
-    return c.json({ message: 'Internal server error' }, 500);
-  }
-});
-
-// 辅助函数：获取笔记详细信息（包括资源和标签）
-async function getMemoWithDetails(db: any, memoId: number) {
-  const memo = await db.prepare(
-    'SELECT m.*, u.username as creator_username FROM memo m JOIN user u ON m.creator_id = u.id WHERE m.id = ?'
-  ).bind(memoId).first();
-
-  if (!memo) return null;
-
-  // 获取关联的资源详细信息
-  const resources = await db.prepare(`
-    SELECT r.id, r.uid, r.filename, r.type, r.size, r.external_link, r.created_ts
-    FROM resource r
-    JOIN memo_resource mr ON r.id = mr.resource_id 
-    WHERE mr.memo_id = ?
-  `).bind(memoId).all();
-
-  const resourceIdList = (resources.results || []).map((r: any) => r.id);
-  
-  // 转换为前端期望的资源格式
-  const resourceList = (resources.results || []).map((r: any) => ({
-    name: `resources/${r.uid}`,
-    uid: r.uid,
-    createTime: new Date(r.created_ts * 1000).toISOString(),
-    filename: r.filename,
-    content: new Uint8Array(), // 空数组
-    externalLink: '', // 空字符串，让前端构建正确的URL
-    type: r.type,
-    size: r.size,
-    memo: `memos/${memo.id}`, // 关联的memo
-  }));
-
-  // 获取标签
-  const tags = await db.prepare(`
-    SELECT t.name FROM tag t 
-    JOIN memo_tag mt ON t.id = mt.tag_id 
-    WHERE mt.memo_id = ?
-  `).bind(memoId).all();
-
-  const tagList = (tags.results || []).map((t: any) => t.name);
-
-  return {
-    id: memo.id,
-    uid: memo.uid,
-    creatorId: memo.creator_id,
-    content: memo.content,
-    visibility: memo.visibility,
-    rowStatus: memo.row_status,
-    createdTs: memo.created_ts,
-    updatedTs: memo.updated_ts,
-    resourceIdList, // 保留向后兼容
-    resources: resourceList, // 新增：完整的资源对象数组
-    tags: tagList
-  };
-}
-
-// 辅助函数：通过 UID 获取用户 ID
-async function getUserIdFromUid(db: any, uid: string): Promise<number | null> {
-  const user = await db.prepare('SELECT id FROM user WHERE uid = ?').bind(uid).first();
-  return user ? user.id : null;
-}
-
-export { memoRoutes }; 
+export { memoRoutes };

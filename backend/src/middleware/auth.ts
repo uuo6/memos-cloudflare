@@ -24,7 +24,17 @@ export async function authMiddleware(c: Context<{ Bindings: Env; Variables: Vari
   }
 
   const token = authHeader.substring(7);
-  
+
+  // 访问令牌（memos_pat_...）：交给 v2 的 authenticate 校验
+  if (token.startsWith('memos_pat_')) {
+    const { authenticate } = await import('../v2/auth');
+    const auth = await authenticate(c.req.raw, c.env as any);
+    if (!auth) return c.json({ message: 'Unauthorized' }, 401);
+    c.set('user', { sub: auth.username, username: auth.username, role: auth.role, iat: 0, exp: 0 } as any);
+    await next();
+    return;
+  }
+
   try {
     const payload = await verifyJWT(token, c.env.JWT_SECRET);
     
