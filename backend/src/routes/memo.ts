@@ -293,7 +293,20 @@ memoRoutes.post('/:id/organizer', async (c) => {
 
 memoRoutes.delete('/:id', async (c) => {
   try {
-    await c.env.DB.prepare('DELETE FROM memo WHERE id = ?').bind(Number(c.req.param('id'))).run();
+    const id = Number(c.req.param('id'));
+    // 级联清理：附件（先删 R2 文件，再删记录）、关系、分享，最后删备忘
+    const atts = await c.env.DB.prepare('SELECT reference FROM attachment WHERE memo_id = ?').bind(id).all<{ reference: string }>();
+    if (c.env.R2) {
+      for (const a of atts.results ?? []) {
+        if (a.reference) { try { await c.env.R2.delete(a.reference); } catch {} }
+      }
+    }
+    await c.env.DB.batch([
+      c.env.DB.prepare('DELETE FROM attachment WHERE memo_id = ?').bind(id),
+      c.env.DB.prepare('DELETE FROM memo_share WHERE memo_id = ?').bind(id),
+      c.env.DB.prepare('DELETE FROM memo_relation WHERE memo_id = ? OR related_memo_id = ?').bind(id, id),
+      c.env.DB.prepare('DELETE FROM memo WHERE id = ?').bind(id),
+    ]);
     return c.json({});
   } catch (error: any) {
     return c.json({ message: 'Internal server error' }, 500);

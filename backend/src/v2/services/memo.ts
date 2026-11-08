@@ -426,11 +426,27 @@ rpc("MemoService", "DeleteMemo", "required", async (req, ctx) => {
   const uidRes = await ctx.env.DB.prepare(`SELECT uid FROM memo WHERE id IN (${ph})`)
     .bind(...ids)
     .all<{ uid: string }>();
+  // 先清理这些备忘的附件文件（R2），再删数据库行，避免留下孤儿文件
+  const attRows = await ctx.env.DB.prepare(`SELECT reference FROM attachment WHERE memo_id IN (${ph})`)
+    .bind(...ids)
+    .all<{ reference: string }>();
+  if (ctx.env.R2) {
+    for (const a of attRows.results ?? []) {
+      if (a.reference) {
+        try {
+          await ctx.env.R2.delete(a.reference);
+        } catch {
+          // 忽略单个失败，保证删除流程继续
+        }
+      }
+    }
+  }
   const contentIds = (uidRes.results ?? []).map((r) => `memos/${r.uid}`);
   const cph = contentIds.map(() => "?").join(",");
 
   const stmts = [
-    ctx.env.DB.prepare(`UPDATE attachment SET memo_id = NULL WHERE memo_id IN (${ph})`).bind(...ids),
+    // 级联删除附件行（R2 对象在上方单独清理）
+    ctx.env.DB.prepare(`DELETE FROM attachment WHERE memo_id IN (${ph})`).bind(...ids),
     ctx.env.DB.prepare(`DELETE FROM memo_share WHERE memo_id IN (${ph})`).bind(...ids),
     ctx.env.DB.prepare(`DELETE FROM memo_relation WHERE memo_id IN (${ph}) OR related_memo_id IN (${ph})`).bind(
       ...ids,

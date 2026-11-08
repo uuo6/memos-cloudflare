@@ -9,6 +9,7 @@ import { memoRoutes } from './routes/memo';
 import { tagRoutes } from './routes/tag';
 import { resourceRoutes } from './routes/resource';
 import { workspaceRoutes } from './routes/workspace';
+import { maintenanceRoutes } from './routes/maintenance';
 import { webhookRoutes } from './routes/webhook';
 import { authMiddleware } from './middleware/auth';
 import { mountConnectRoutes } from './v2/router';
@@ -80,6 +81,7 @@ app.route('/api/auth', authRoutes);
 
 // workspace 路由 - /profile 和 /setting GET 端点是公开的
 app.route('/api/workspace', workspaceRoutes);
+app.route('/api/maintenance', maintenanceRoutes);
 
 // 需要认证的路由
 app.use('/api/user/*', authMiddleware);
@@ -102,6 +104,7 @@ app.route('/api/webhook', webhookRoutes);
 // ===== 旧版（0.21 风格）REST 也挂到 /api/v1，供 Moe Memos 等按 0.21 协议访问的客户端 =====
 app.route('/api/v1/auth', authRoutes);
 app.route('/api/v1/workspace', workspaceRoutes);
+app.route('/api/v1/maintenance', maintenanceRoutes);
 app.use('/api/v1/user/*', authMiddleware);
 app.use('/api/v1/tag/*', authMiddleware);
 app.use('/api/v1/resource/*', authMiddleware);
