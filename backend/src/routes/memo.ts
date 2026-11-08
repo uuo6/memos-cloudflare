@@ -65,7 +65,7 @@ memoRoutes.get('/', async (c) => {
     const params: any[] = [rowStatus];
     if (creatorId) { sql += ' AND creator_id = ?'; params.push(Number(creatorId)); }
     if (visibility) { sql += ' AND visibility = ?'; params.push(visibility); }
-    sql += ' ORDER BY created_ts DESC LIMIT ? OFFSET ?';
+    sql += ' ORDER BY pinned DESC, pinned_ts DESC, created_ts DESC LIMIT ? OFFSET ?';
     params.push(limit, offset);
 
     const rows = await c.env.DB.prepare(sql).bind(...params).all<any>();
@@ -127,7 +127,7 @@ memoRoutes.get('/all', async (c) => {
     }
     if (creatorId) { sql += ' AND creator_id = ?'; params.push(Number(creatorId)); }
     if (pinnedRaw === 'true' || pinnedRaw === 'false') { sql += ' AND pinned = ?'; params.push(pinnedRaw === 'true' ? 1 : 0); }
-    sql += ' ORDER BY created_ts DESC LIMIT ? OFFSET ?';
+    sql += ' ORDER BY pinned DESC, pinned_ts DESC, created_ts DESC LIMIT ? OFFSET ?';
     params.push(limit, offset);
 
     const rows = await c.env.DB.prepare(sql).bind(...params).all<any>();
@@ -234,7 +234,10 @@ memoRoutes.patch('/:id', async (c) => {
     }
     if (body.visibility) { sets.push('visibility = ?'); params.push(body.visibility); }
     if (body.rowStatus) { sets.push('row_status = ?'); params.push(body.rowStatus); }
-    if (typeof body.pinned === 'boolean') { sets.push('pinned = ?'); params.push(body.pinned ? 1 : 0); }
+    if (typeof body.pinned === 'boolean') {
+      sets.push('pinned = ?'); params.push(body.pinned ? 1 : 0);
+      if (body.pinned) { sets.push('pinned_ts = ?'); params.push(Math.floor(Date.now() / 1000)); } else { sets.push('pinned_ts = NULL'); }
+    }
     const resourceIds: number[] = Array.isArray(body.resourceIdList)
       ? body.resourceIdList.map(Number).filter(Number.isFinite)
       : [];
@@ -274,8 +277,9 @@ memoRoutes.post('/:id/organizer', async (c) => {
   try {
     const id = Number(c.req.param('id'));
     const body = await c.req.json().catch(() => ({}) as any);
-    await c.env.DB.prepare('UPDATE memo SET pinned = ?, updated_ts = ? WHERE id = ?')
-      .bind(body.pinned ? 1 : 0, Math.floor(Date.now() / 1000), id)
+    const nowTs = Math.floor(Date.now() / 1000);
+    await c.env.DB.prepare('UPDATE memo SET pinned = ?, pinned_ts = ?, updated_ts = ? WHERE id = ?')
+      .bind(body.pinned ? 1 : 0, body.pinned ? nowTs : null, nowTs, id)
       .run();
     // 客户端会把响应体当作 MemosV0Memo 解析，必须返回完整对象
     const row = await c.env.DB.prepare('SELECT * FROM memo WHERE id = ?').bind(id).first<any>();

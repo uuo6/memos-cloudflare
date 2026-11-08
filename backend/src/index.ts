@@ -70,25 +70,6 @@ app.get('/health', (c) => {
   });
 });
 
-// ===== 轻量调试日志：只记录写操作和失败请求 =====
-let reqLogReady2 = false;
-app.use('/api/*', async (c, next) => {
-  await next();
-  const isWrite = ['POST', 'PATCH', 'PUT', 'DELETE'].includes(c.req.method);
-  if (!isWrite && c.res.status < 400) return;
-  try {
-    if (!reqLogReady2) {
-      await c.env.DB.prepare(
-        'CREATE TABLE IF NOT EXISTS req_log (id INTEGER PRIMARY KEY AUTOINCREMENT, method TEXT, path TEXT, status INTEGER, ua TEXT, ts INTEGER)',
-      ).run();
-      reqLogReady2 = true;
-    }
-    const url = new URL(c.req.url);
-    await c.env.DB.prepare('INSERT INTO req_log (method, path, status, ua, ts) VALUES (?, ?, ?, ?, ?)')
-      .bind(c.req.method, url.pathname + (url.search ? url.search.slice(0, 100) : ''), c.res.status, (c.req.header('user-agent') || '').slice(0, 60), Math.floor(Date.now() / 1000))
-      .run();
-  } catch {}
-});
 // ===== v2: Connect JSON API（对齐上游 Memos v0.29，前端 v0.29.1 使用） =====
 mountConnectRoutes(app);
 mountFileServer(app);

@@ -21,8 +21,8 @@ const Explore = () => {
     visibilities,
   });
 
-  // Get sorting logic using unified hook (no pinned sorting)
-  const { listSort, orderBy } = useMemoSorting({
+  // 排序完全交给服务端（置顶 → 置顶时间倒序 → 发布时间倒序），前端不再二次排序
+  const { orderBy } = useMemoSorting({
     pinnedFirst: false,
     state: State.NORMAL,
   });
@@ -30,7 +30,6 @@ const Explore = () => {
   return (
     <PagedMemoList
       renderer={(memo: Memo) => <MemoView key={`${memo.name}-${memo.updateTime}`} memo={memo} showCreator showVisibility compact />}
-      listSort={listSort}
       orderBy={orderBy}
       filter={memoFilter}
       showCreator

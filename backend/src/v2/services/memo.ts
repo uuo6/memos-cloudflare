@@ -227,7 +227,10 @@ rpc("MemoService", "ListMemos", "optional", async (req, ctx) => {
 
   const { where: filterWhere, params: filterParams } = parseMemoFilter(req.filter);
   const [visWhere, visParams] = visibilityWhere(ctx.auth);
-  const orderSql = parseOrderBy(req.orderBy);
+  // 默认排序：置顶优先，其余按创建时间倒序（与上游「置顶在前」的展示习惯一致）
+  // 置顶始终优先，其余按客户端指定的排序（缺省为创建时间倒序）
+  const baseOrder = req.orderBy ? parseOrderBy(req.orderBy) : "created_ts desc";
+  const orderSql = baseOrder.includes("pinned") ? baseOrder : `pinned desc, pinned_ts desc, ${baseOrder}`;
   const { limit, offset } = resolvePage(req);
 
   // 对齐上游：主列表排除 COMMENT 子 memo
@@ -262,6 +265,16 @@ rpc("MemoService", "GetMemo", "optional", async (req, ctx) => {
 // ============================================================
 // UpdateMemo
 // ============================================================
+/** 兼容 updateMask 的多种写法：{paths:[...]} / ["a","b"] / "a,b" / "a" */
+function normalizeMask(input: any): string[] {
+  if (!input) return [];
+  if (typeof input === "string") {
+    return input.split(",").map((s) => s.trim()).filter(Boolean).map((p) => p.replace(/[A-Z]/g, (m) => `_${m.toLowerCase()}`));
+  }
+  if (Array.isArray(input)) return input.filter((p) => typeof p === "string") as string[];
+  if (Array.isArray(input.paths)) return input.paths.filter((p: unknown) => typeof p === "string") as string[];
+  return [];
+}
 rpc("MemoService", "UpdateMemo", "required", async (req, ctx) => {
   const auth = requireAuth(ctx);
   const memo = req.memo ?? {};
@@ -269,7 +282,7 @@ rpc("MemoService", "UpdateMemo", "required", async (req, ctx) => {
   const row = await getMemoOrThrow(ctx.env, uid);
   if (!canManage(auth, row)) throw permissionDenied();
 
-  let paths: string[] = Array.isArray(req.updateMask?.paths) ? req.updateMask.paths : [];
+  let paths: string[] = normalizeMask(req.updateMask);
   // 兼容上游：未提供 updateMask 时，按请求里实际携带的字段推断（网页端部分编辑流程不带 mask）
   if (paths.length === 0) {
     const fields: Array<[string, unknown]> = [
@@ -319,6 +332,13 @@ rpc("MemoService", "UpdateMemo", "required", async (req, ctx) => {
       case "pinned": {
         sets.push("pinned = ?");
         params.push(memo.pinned ? 1 : 0);
+        // 记录「置顶操作时间」，用于按置顶先后排序
+        if (memo.pinned) {
+          sets.push("pinned_ts = ?");
+          params.push(Math.floor(Date.now() / 1000));
+        } else {
+          sets.push("pinned_ts = NULL");
+        }
         break;
       }
       case "state": {

@@ -48,6 +48,7 @@ CREATE TABLE memo (
   content    TEXT NOT NULL DEFAULT '',
   visibility TEXT NOT NULL CHECK (visibility IN ('PUBLIC', 'PROTECTED', 'PRIVATE')) DEFAULT 'PRIVATE',
   pinned     INTEGER NOT NULL CHECK (pinned IN (0, 1)) DEFAULT 0,
+  pinned_ts  INTEGER,                                    -- set when pinned (ordering)
   -- payload JSON: {"tags":[...],"property":{"hasLink":..,"hasTaskList":..,"hasCode":..,"hasIncompleteTasks":..,"title":".."},"location":{...},"snippet":".."}
   payload    TEXT NOT NULL DEFAULT '{}'
 );

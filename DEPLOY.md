@@ -86,3 +86,11 @@ npx wrangler deploy
 
 - 附件外链带 HMAC 签名（`?sig=`），签名不过期；若想收紧可改为带过期时间
 - 缩略图未实现（`?thumbnail=true` 直接返回原图）
+
+### Upgrade from an older deploy (existing database)
+
+```bash
+cd backend
+npx wrangler d1 execute memos --remote --command "ALTER TABLE memo ADD COLUMN pinned_ts INTEGER"
+npx wrangler d1 execute memos --remote --command "UPDATE memo SET pinned_ts = updated_ts WHERE pinned = 1 AND pinned_ts IS NULL"
+```n
